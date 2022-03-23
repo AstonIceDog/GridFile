@@ -2,42 +2,48 @@ import time
 from operator import attrgetter
 import numpy as np
 import struct as st
+import math
+import os
 
-DATA = "sim_data"
+DATA = "geo_data"
 max_c = 341  # 25 * 7   # 最大桶容量 10<c<1000 c=70效果最好 7 70 700
 flag = 0    # 表示分裂次数，用来循环分裂操作flag % 3 == 0时分裂x；flag % 3 == 1时分裂y；flag % 3 == 2时分裂z
-if DATA == "sim_data":
+if DATA == "sim_data_30w":
     data_file_name = "sim.dat"
     index_file_name = "sim.idx"
     range_query_file_name = "rangeQuery_sim.txt"
     point_query_file1_name = "pointQuery1_sim.txt"
     point_query_file2_name = "pointQuery2_sim.txt"
-    nx = 30      #
-    ny = 30      #
-    nz = 30      # grid array 大小
+    nx = 29      #
+    ny = 29      #
+    nz = 29      # grid array 大小
     max_x_value = 50000     # x
     min_x_value = 0
     max_y_value = 50000     # y
     min_y_value = 0
     max_z_value = 1000      # t
     min_z_value = 0
-    max_count = 300000  # 一期20w数据
+    max_count = 300000  # 一期200w数据
+    ep_start_t = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     ep_time = 1000
 elif DATA == "geo_data":
     data_file_name = "geo.dat"
     index_file_name = "geo.idx"
     range_query_file_name = "rangeQuery_real.txt"
-    point_query_file_name = "pointQuery_real.txt"
-    nx = 5      #
-    ny = 5      #
-    nz = 110      # grid array 大小
+    point_query_file1_name = "pointQuery1_real.txt"
+    point_query_file2_name = "pointQuery2_real.txt"
+    nx = 300      #
+    ny = 300      #
+    nz = 300      # grid array 大小
     max_x_value = 116.7285615      # x
     max_y_value = 40.1799936     # y
     min_x_value = 116.0800006   # 116.0800006
     min_y_value = 39.6800104000001     # 39.6800104000001
-    max_z_value = 90000      # t
+    max_z_value = 2678400      # t
     min_z_value = 0
-    max_count = 200000  # 一期20w数据
+    max_count = 299390  # 一期20w数据
+    ep_start_t = [0, 1228060800, 1230739200, 1233417600, 1235836800, 1238515200, 1241107200, 1243785600, 1246377600, 1249056000, 1251734400]
+    ep_time = 2678400
 
 
 class Record:
@@ -75,12 +81,14 @@ class Buffer:
 
     # 将块添加入缓存区
     def append(self, block):
+        global write_time
         if len(self.id_list) < self.max_size:
             self.id_list.append(block.id)
             self.block_dict[block.id] = block
         else:
             out_block_id = self.id_list[0]
             del self.id_list[0]
+            write_time += 1
             del self.block_dict[out_block_id]
             self.id_list.append(block.id)
             self.block_dict[block.id] = block
@@ -88,7 +96,7 @@ class Buffer:
 
 # 写数据块（块）
 def write_block(block):
-    data_file.seek(block.id * (max_c * 24 + 8))  # 每个桶存max_c*24B的数据，即max_c个点
+    data_file.seek(block.id *(max_c * 24 + 8))
     for record in block.list:
         b_x = st.pack("d", record.x)
         b_y = st.pack("d", record.y)
@@ -106,7 +114,7 @@ def write_block(block):
 # 建立模型
 # 建立3维栅格数组
 # 3维栅格数组，数组值为桶号，初始为桶0
-grid_array = np.arange(nx * ny * nz).reshape(nx, ny, nz)
+grid_array = np.arange(nx * ny * nz, dtype='int64').reshape(nx, ny, nz)
 # 建立线性刻度，方便查找
 X = [min_x_value]  # 线性刻度
 Y = [min_y_value]
@@ -131,6 +139,9 @@ def split_x(pos):
     global num
     global nx
     global grid_array
+    global visit_time
+    global index_buffer
+    global write_time
     old_bucket_id = grid_array[pos.x][pos.y][pos.z]
     mid_x = (X[pos.x] + X[pos.x + 1]) / 2
     X.insert(pos.x + 1, mid_x)
@@ -139,6 +150,31 @@ def split_x(pos):
     # grid array切割
     grid_array = np.insert(grid_array, pos.x, grid_array[pos.x], axis=0)
     grid_array[pos.x + 1][pos.y][pos.z] = num
+    for i in range(math.ceil((nx * ny * nz) / 1024)):
+        # 现在缓冲区中查找索引块
+        find_block = 0
+        if len(index_buffer.id_list) != 0 and i in index_buffer.block_dict:
+            block = index_buffer.block_dict[i]
+            # bucket_id = block.list[pos_in_block]
+            find_block = 1
+        # 如果缓冲区中没找到，则去硬盘读取索引块
+        if find_block == 0:
+            with open(index_file_name, 'rb') as index_file:
+                index_file.seek(i * 8 * 1024)
+                index_str = index_file.read(8 * 1024)
+                index_block = Block()
+                index_block.id = i
+                index_block.list = []
+                for i in range(1024):
+                    if len(index_str[i * 8:i * 8 + 8]) != 8:
+                        break
+                    index_tuple = st.unpack("q", index_str[i * 8:i * 8 + 8])
+                    index_block.list.append(index_tuple[0])
+                # bucket_id = index_block.list[pos_in_block]
+                index_buffer.append(index_block)
+    visit_time += math.ceil((nx * ny * nz) / 1024)
+    index_buffer.block_dict.clear()
+    index_buffer.id_list.clear()
     # 将bucket中大于x_mid对应的线性刻度的记录移到bucket_new中
     y_min = Y[pos.y]
     y_max = Y[pos.y + 1]
@@ -152,11 +188,13 @@ def split_x(pos):
     B.append(new_bucket)
     remove_record = []
     for record in B[old_bucket_id].list:
-        if X[pos.x] <= record.x < mid_x and y_min <= record.y < y_max and z_min <= record.z % ep_time < z_max:  # 如果小于，则写入新桶，并删除
+        if X[pos.x] <= record.x < mid_x and y_min <= record.y < y_max and z_min <= record.z < z_max:  # 如果小于，则写入新桶，并删除
             B[new_bucket.id].list.append(record)
             remove_record.append(record)
     for record in remove_record:
         B[old_bucket_id].list.remove(record)
+    # write_block(new_bucket)
+    write_time += 1
 
 
 # 按y坐标分割，竖着切一刀
@@ -165,6 +203,9 @@ def split_y(pos):
     global num
     global ny
     global grid_array
+    global visit_time
+    global index_buffer
+    global write_time
     old_bucket_id = grid_array[pos.x][pos.y][pos.z]
     mid_y = (Y[pos.y] + Y[pos.y + 1]) / 2
     Y.insert(pos.y + 1, mid_y)
@@ -173,6 +214,31 @@ def split_y(pos):
     # grid array切割
     grid_array = np.insert(grid_array, pos.y, grid_array[:, pos.y], axis=1)
     grid_array[pos.x][pos.y + 1][pos.z] = num
+    for i in range(math.ceil((nx * ny * nz) / 1024)):
+        # 现在缓冲区中查找索引块
+        find_block = 0
+        if len(index_buffer.id_list) != 0 and i in index_buffer.block_dict:
+            block = index_buffer.block_dict[i]
+            # bucket_id = block.list[pos_in_block]
+            find_block = 1
+        # 如果缓冲区中没找到，则去硬盘读取索引块
+        if find_block == 0:
+            with open(index_file_name, 'rb') as index_file:
+                index_file.seek(i * 8 * 1024)
+                index_str = index_file.read(8 * 1024)
+                index_block = Block()
+                index_block.id = i
+                index_block.list = []
+                for i in range(1024):
+                    if len(index_str[i * 8:i * 8 + 8]) != 8:
+                        break
+                    index_tuple = st.unpack("q", index_str[i * 8:i * 8 + 8])
+                    index_block.list.append(index_tuple[0])
+                # bucket_id = index_block.list[pos_in_block]
+                index_buffer.append(index_block)
+    visit_time += math.ceil((nx * ny * nz) / 1024)
+    index_buffer.block_dict.clear()
+    index_buffer.id_list.clear()
     # 将bucket中大于x_mid对应的线性刻度的记录移到bucket_new中
     x_min = X[pos.x]
     x_max = X[pos.x + 1]
@@ -186,11 +252,13 @@ def split_y(pos):
     B.append(new_bucket)
     remove_record = []
     for record in B[old_bucket_id].list:
-        if x_min <= record.x < x_max and Y[pos.y] <= record.y < mid_y and z_min <= record.z % ep_time < z_max:  # 如果小于，则写入新桶，并删除
+        if x_min <= record.x < x_max and Y[pos.y] <= record.y < mid_y and z_min <= record.z < z_max:  # 如果小于，则写入新桶，并删除
             B[new_bucket.id].list.append(record)
             remove_record.append(record)
     for record in remove_record:
         B[old_bucket_id].list.remove(record)
+    # write_block(new_bucket)
+    write_time += 1
 
 
 # 按z坐标分割，竖着切一刀
@@ -199,6 +267,9 @@ def split_z(pos):
     global num
     global nz
     global grid_array
+    global visit_time
+    global index_buffer
+    global write_time
     old_bucket_id = grid_array[pos.x][pos.y][pos.z]
     mid_z = (Z[pos.z] + Z[pos.z + 1]) / 2
     Z.insert(pos.z + 1, mid_z)
@@ -207,11 +278,36 @@ def split_z(pos):
     # grid array切割
     grid_array = np.insert(grid_array, pos.z, grid_array[:, :, pos.z], axis=2)
     grid_array[pos.x][pos.y][pos.z + 1] = num
+    for i in range(math.ceil((nx * ny * nz) / 1024)):
+        # 现在缓冲区中查找索引块
+        find_block = 0
+        if len(index_buffer.id_list) != 0 and i in index_buffer.block_dict:
+            block = index_buffer.block_dict[i]
+            # bucket_id = block.list[pos_in_block]
+            find_block = 1
+        # 如果缓冲区中没找到，则去硬盘读取索引块
+        if find_block == 0:
+            with open(index_file_name, 'rb') as index_file:
+                index_file.seek(i * 8 * 1024)
+                index_str = index_file.read(8 * 1024)
+                index_block = Block()
+                index_block.id = i
+                index_block.list = []
+                for i in range(1024):
+                    if len(index_str[i * 8:i * 8 + 8]) != 8:
+                        break
+                    index_tuple = st.unpack("q", index_str[i * 8:i * 8 + 8])
+                    index_block.list.append(index_tuple[0])
+                # bucket_id = index_block.list[pos_in_block]
+                index_buffer.append(index_block)
+    visit_time += math.ceil((nx * ny * nz) / 1024)
+    index_buffer.block_dict.clear()
+    index_buffer.id_list.clear()
     # 将bucket中大于x_mid对应的线性刻度的记录移到bucket_new中
     x_min = X[pos.x]
     x_max = X[pos.x + 1]
-    y_min = Y[pos.z]
-    y_max = Y[pos.z + 1]
+    y_min = Y[pos.y]
+    y_max = Y[pos.y + 1]
     # 添加新桶
     new_bucket = Block()
     new_bucket.id = num
@@ -220,11 +316,13 @@ def split_z(pos):
     B.append(new_bucket)
     remove_record = []
     for record in B[old_bucket_id].list:
-        if x_min <= record.x < x_max and y_min <= record.y < y_max and Z[pos.z] <= record.z % ep_time < mid_z:  # 如果小于，则写入新桶，并删除
+        if x_min <= record.x < x_max and y_min <= record.y < y_max and Z[pos.z] <= record.z < mid_z:  # 如果小于，则写入新桶，并删除
             B[new_bucket.id].list.append(record)
             remove_record.append(record)
     for record in remove_record:
         B[old_bucket_id].list.remove(record)
+    # write_block(new_bucket)
+    write_time += 1
 
 
 # 在线性刻度上查找记录，返回grid_array中的三维坐标
@@ -254,6 +352,7 @@ def insert(r):
     global data_buffer
     global index_buffer
     global visit_time
+    global write_time
     pos = find(r)
     if ep == 1:
         bucket_id = grid_array[pos.x][pos.y][pos.z]
@@ -261,8 +360,8 @@ def insert(r):
         if len(B[bucket_id].list) > max_c:
             flag += 1
     elif ep > 1:
-        # 插入时，要加上周期时间 ep=1 0~1000
-        r.z = r.z + (ep - 1) * ep_time
+        bucket_id = grid_array[pos.x][pos.y][pos.z]
+        B[bucket_id].list.append(r)
         # 根据栅格数组的值，找到桶
         # 根据grid array中的位置，计算出索引块号以及块中位置
         block_id = int((pos.x * ny * nz + pos.y * nz + pos.z) / 1024)
@@ -276,7 +375,6 @@ def insert(r):
         # 如果缓冲区中没找到，则去硬盘读取索引块
         if find_block == 0:
             with open(index_file_name, 'rb') as index_file:
-                visit_time += 1
                 index_file.seek(block_id * 8 * 1024)
                 index_str = index_file.read(8 * 1024)
                 index_block = Block()
@@ -289,19 +387,17 @@ def insert(r):
                     index_block.list.append(index_tuple[0])
                 # bucket_id = index_block.list[pos_in_block]
                 index_buffer.append(index_block)
-        bucket_id = grid_array[pos.x][pos.y][pos.z]
         # 将记录r插入桶
         # 在缓存中寻找数据块，如果找到直接在缓存中的数据块中查找点
         find_block = 0
         if len(data_buffer.id_list) != 0 and bucket_id in data_buffer.block_dict:
             bucket = data_buffer.block_dict[bucket_id]
             bucket.list.append(r)
-            B[bucket_id].list.append(r)
+            # B[bucket_id].list.append(r)
             find_block = 1
         # 在缓存中没找到数据块，则到硬盘上找，并加入缓存中，然后查找点
         if find_block == 0:
             with open(data_file_name, 'rb') as data_file:
-                visit_time += 1
                 data_file.seek(bucket_id * (max_c * 24 + 8))
                 str = data_file.read(max_c * 24 + 8)
                 bucket = Block()
@@ -319,104 +415,124 @@ def insert(r):
                     record.z = record_str[2]
                     bucket.list.append(record)
                 bucket.list.append(r)
-            B[bucket_id].list.append(r)
-            # 如果桶溢出,则进行分裂操作
-            # 分裂前检查是否两个块指向一个桶！！！
-            if len(B[bucket_id].list) > max_c:
-                if grid_array[pos.x + 1][pos.y][pos.z] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x + 1][pos.y][pos.z] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.x >= X[pos.x + 1]:    # 如果大于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                elif grid_array[pos.x - 1][pos.y][pos.z] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x - 1][pos.y][pos.z] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.x < X[pos.x]:  # 如果小于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                elif grid_array[pos.x][pos.y + 1][pos.z] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x][pos.y + 1][pos.z] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.y >= Y[pos.y + 1]:  # 如果大于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                elif grid_array[pos.x][pos.y - 1][pos.z] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x][pos.y - 1][pos.z] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.y < Y[pos.y]:  # 如果小于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                elif grid_array[pos.x][pos.y][pos.z + 1] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x][pos.y][pos.z + 1] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.z % ep_time >= Z[pos.z + 1]:  # 如果大于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                elif grid_array[pos.x][pos.y][pos.z - 1] == bucket_id:
-                    remove_record = []
-                    new_bucket = Block()
-                    new_bucket.list = []
-                    new_bucket.id = num
-                    num += 1
-                    grid_array[pos.x][pos.y][pos.z - 1] = new_bucket.id
-                    for record in B[bucket_id].list:
-                        if record.z % ep_time < Z[pos.z]:  # 如果小于，则写入新桶，并删除
-                            new_bucket.list.append(record)
-                            remove_record.append(record)
-                    for record in remove_record:
-                        B[bucket_id].list.remove(record)
-                    B.append(new_bucket)
-                # 设置一个flag 划分一次变一个值，循环划分，偶数横向划分，奇数纵向划分
-                elif flag % 3 == 0:
-                    split_x(pos)
-                    flag += 1
-                elif flag % 3 == 1:
-                    split_y(pos)
-                    flag += 1
-                elif flag % 3 == 2:
-                    split_z(pos)
-                    flag += 1
+            # B[bucket_id].list.append(r)
+        # 如果桶溢出,则进行分裂操作
+        # 分裂前检查是否两个块指向一个桶！！！
+        if len(B[bucket_id].list) > max_c:
+            print(1)
+            if grid_array[pos.x + 1][pos.y][pos.z] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x + 1][pos.y][pos.z] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.x >= X[pos.x + 1]:    # 如果大于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            elif grid_array[pos.x - 1][pos.y][pos.z] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x - 1][pos.y][pos.z] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.x < X[pos.x]:  # 如果小于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            elif grid_array[pos.x][pos.y + 1][pos.z] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x][pos.y + 1][pos.z] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.y >= Y[pos.y + 1]:  # 如果大于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            elif grid_array[pos.x][pos.y - 1][pos.z] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x][pos.y - 1][pos.z] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.y < Y[pos.y]:  # 如果小于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            elif grid_array[pos.x][pos.y][pos.z + 1] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x][pos.y][pos.z + 1] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.z >= Z[pos.z + 1]:  # 如果大于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            elif grid_array[pos.x][pos.y][pos.z - 1] == bucket_id:
+                remove_record = []
+                new_bucket = Block()
+                new_bucket.list = []
+                new_bucket.id = num
+                num += 1
+                grid_array[pos.x][pos.y][pos.z - 1] = new_bucket.id
+                write_time += 1
+                for record in B[bucket_id].list:
+                    if record.z < Z[pos.z]:  # 如果小于，则写入新桶，并删除
+                        new_bucket.list.append(record)
+                        remove_record.append(record)
+                for record in remove_record:
+                    B[bucket_id].list.remove(record)
+                B.append(new_bucket)
+                # write_block(new_bucket)
+                write_time += 1
+            # 设置一个flag 划分一次变一个值，循环划分，偶数横向划分，奇数纵向划分
+            elif flag % 3 == 0:
+                split_x(pos)
+                flag += 1
+            elif flag % 3 == 1:
+                split_y(pos)
+                flag += 1
+            elif flag % 3 == 2:
+                split_z(pos)
+                flag += 1
+        if find_block == 0:
             data_buffer.append(bucket)
 
 
@@ -426,8 +542,6 @@ def point_query(r):
     global data_buffer
     global nx, ny, nz
     # 根据linear scale找到grid array中的位置
-    ep = int(r.z / ep_time) + 1
-    r.z = r.z % ep_time
     pos = find(r)
     # 根据grid array中的位置，计算出索引块号以及块中位置
     block_id = int((pos.x * ny * nz + pos.y * nz + pos.z) / 1024)
@@ -458,12 +572,15 @@ def point_query(r):
     if len(data_buffer.id_list) != 0 and bucket_id in data_buffer.block_dict:
         bucket = data_buffer.block_dict[bucket_id]
         for record in bucket.list:
-            if record.x == r.x and record.y == r.y and record.z == r.z + (ep - 1) * ep_time:
+            if record.x == r.x and record.y == r.y and record.z == r.z:
                 return 1
         return 0
     # 在缓存中没找到数据块，则到硬盘上找，并加入缓存中，然后查找点
     with open(data_file_name, 'rb') as data_file:
         visit_time += 1
+        # data_file.seek(0)
+        # for i in range(bucket_id - 1):
+        #     data_file.seek(max_c * 24 + 8, 1)  # 每个桶存max_c*24B的数据，即max_c个点
         data_file.seek(bucket_id * (max_c * 24 + 8))
         str = data_file.read(max_c * 24 + 8)
         bucket = Block()
@@ -482,7 +599,7 @@ def point_query(r):
             bucket.list.append(record)
         data_buffer.append(bucket)
         for record in bucket.list:
-            if record.x == r.x and record.y == r.y and record.z == r.z + (ep - 1) * ep_time:
+            if record.x == r.x and record.y == r.y and record.z == r.z:
                 return 1
     return 0
 
@@ -492,6 +609,7 @@ def range_query(rang):
     global visit_time
     global index_buffer
     global data_buffer
+    global bucket_count
     bucket_id_set = set()
     pos_list = []
     range_array = []
@@ -545,6 +663,7 @@ def range_query(rang):
                 bucket_id_set.add(bucket_id)
                 index_buffer.append(index_block)
         bucket_id_set.add(bucket_id)
+    bucket_count += len(bucket_id_set)
     # 在桶号集合中查找，遍历每一个桶，查找范围中的点
     for bucket_id in bucket_id_set:
         # 在缓存中寻找数据块，如果找到直接在缓存中的数据块中查找点
@@ -554,12 +673,15 @@ def range_query(rang):
             bucket = data_buffer.block_dict[bucket_id]
             for record in bucket.list:
                 if (rang.x_min <= record.x <= rang.x_max) and (rang.y_min <= record.y <= rang.y_max) and (
-                        rang.z_min <= record.z % ep_time <= rang.z_max):
+                        rang.z_min <= record.z <= rang.z_max):
                     range_array.append(record)
         # 在缓存中没找到数据块，则到硬盘上找，并加入缓存中，然后查找点
         if find_block == 0:
             with open(data_file_name, 'rb') as data_file:
                 visit_time += 1
+                # data_file.seek(0)
+                # for i in range(bucket_id - 1):
+                #     data_file.seek(max_c * 24 + 8, 1)  # 每个桶存max_c*24B的数据，即max_c个点
                 data_file.seek(bucket_id * (max_c * 24 + 8))
                 str = data_file.read(max_c * 24 + 8)
                 bucket = Block()
@@ -576,7 +698,7 @@ def range_query(rang):
                     record.z = record_str[2]
                     bucket.list.append(record)
                     if (rang.x_min <= record.x <= rang.x_max) and (rang.y_min <= record.y <= rang.y_max) and (
-                            rang.z_min <= record.z % ep_time <= rang.z_max):
+                            rang.z_min <= record.z <= rang.z_max):
                         range_array.append(record)
     return range_array
 
@@ -587,25 +709,45 @@ data_buffer.max_size = 128
 data_buffer.id_list = []
 data_buffer.block_dict = {}
 index_buffer = Buffer()
-index_buffer.max_size = 512
+index_buffer.max_size = 640
 index_buffer.id_list = []
 index_buffer.block_dict = {}
 visit_time = 0
+write_time = 0
 count = 0
 R = []
 ep = 1
 print('ep' + str(ep))
 time_start = time.time()
-for i in range(300):
-    with open(DATA + '/EP1/' + str(i) + '.txt') as file_object:
-        for line in file_object:
-            line = line.rstrip()
-            line = line.split(",")
-            r = Record()
-            r.x = float(line[3])
-            r.y = float(line[4])
-            r.z = int(line[1])
-            R.append(r)
+if DATA == "sim_data_30w":
+    print(DATA)
+    for i in range(300):
+        with open(DATA + '/EP1/' + str(i) + '.txt') as file_object:
+            for line in file_object:
+                line = line.rstrip()
+                line = line.split(",")
+                r = Record()
+                r.x = float(line[3])
+                r.y = float(line[4])
+                r.z = int(line[1])
+                R.append(r)
+elif DATA == "geo_data":
+    print(DATA)
+    path = DATA + '/EP1/'
+    dirs = os.listdir(path)
+    for file_name in dirs:
+        with open(path + '/' + file_name) as file_object:
+            for line in file_object:
+                line = line.rstrip()
+                line = line.split(",")
+                r = Record()
+                r.x = float(line[3])
+                r.y = float(line[4])
+                r.z = float(line[5]) - ep_start_t[ep]
+                if r.z > ep_time:
+                    continue
+                R.append(r)
+visit_time += math.ceil(max_count / 341)
 print(len(R))
 R.sort(key=attrgetter("x"))
 for i in range(1, nx):
@@ -624,6 +766,7 @@ Z.append(max_z_value)
 print(Z)
 for r in R:
     insert(r)
+print('flag = ' + str(flag))
 # 将grid array 写入硬盘
 index_file = open(index_file_name, 'wb')
 for i in range(nx):
@@ -631,32 +774,40 @@ for i in range(nx):
         for k in range(nz):
             bucket_id = st.pack("q", grid_array[i][j][k])
             index_file.write(bucket_id)
+visit_time += math.ceil((nx * ny * nz) / 1024)
 index_file.close()
 # 将桶中数据写入硬盘
 data_file = open(data_file_name, 'wb')
+write_time_start = time.time()
 for i in range(num):
     write_block(B[i])
+    visit_time += 1
+write_time_end = time.time()
 data_file.close()
 time_end = time.time()
 print('cost of build time:', time_end - time_start, 's')
-print('flag = ' + str(flag))
+print('visit time:', visit_time)
+print(visit_time * 0.3, "ms")
+print("\n")
 
 
 # 静态装入点查询
 # 一个索引块可以放1024(1000)个索引项 1000 * 8
 # 一个数据块可以放341个数据
+print("point query")
 data_buffer = Buffer()
 data_buffer.max_size = 128
 data_buffer.id_list = []
 data_buffer.block_dict = {}
 index_buffer = Buffer()
-index_buffer.max_size = 512
+index_buffer.max_size = 640
 index_buffer.id_list = []
 index_buffer.block_dict = {}
 time_start = time.time()
 success = 0
 fail = 0
 visit_time = 0
+write_time = 0
 index_file = open(index_file_name, "rb")
 data_file = open(data_file_name, "rb")
 with open(point_query_file1_name) as file_object:
@@ -672,22 +823,27 @@ with open(point_query_file1_name) as file_object:
             success += 1
         elif result == 0:
             fail += 1
+visit_time += math.ceil(500 / 341)
 time_end = time.time()
 print('point_query_time cost:', time_end - time_start, 's')
 print('visit time:', visit_time)
+print("\n")
 
 
 # 范围查询
+print("range query")
 data_buffer = Buffer()
 data_buffer.max_size = 128
 data_buffer.id_list = []
 data_buffer.block_dict = {}
 index_buffer = Buffer()
-index_buffer.max_size = 512
+index_buffer.max_size = 640
 index_buffer.id_list = []
 index_buffer.block_dict = {}
 record_sum = 0
 visit_time = 0
+write_time = 0
+bucket_count = 0
 time_start = time.time()
 # 将索引块加入缓存区
 index_file = open(index_file_name, "rb")
@@ -708,36 +864,61 @@ with open(range_query_file_name) as file_object:
         result = range_query(rang)
         record_count = len(result)
         record_sum += record_count
+visit_time += math.ceil(1000 / 341)
 time_end = time.time()
 print('range_query_time cost:', time_end - time_start, 's')
 print('visit time:', visit_time)
 print('record sum:', record_sum)
+print('bucket count:', bucket_count)
+print("\n")
 
 
 # 动态装入 ep2~ep10
 flag = 0
 for ep in range(2, 11):
+    index_file = open(index_file_name, "rb")
+    data_file = open(data_file_name, "rb")
     visit_time = 0
+    write_time = 0
     data_buffer = Buffer()
     data_buffer.max_size = 128
     data_buffer.id_list = []
     data_buffer.block_dict = {}
     index_buffer = Buffer()
-    index_buffer.max_size = 512
+    index_buffer.max_size = 640
     index_buffer.id_list = []
     index_buffer.block_dict = {}
     print('ep' + str(ep))
     time_start = time.time()
-    for i in range(300):
-        with open(DATA + '/EP'+str(ep)+'/' + str(i) + '.txt') as file_object:
-            for line in file_object:
-                line = line.rstrip()
-                line = line.split(",")
-                r = Record()
-                r.x = float(line[3])
-                r.y = float(line[4])
-                r.z = int(line[1])
-                insert(r)
+    if DATA == 'sim_data_30w':
+        for i in range(300):
+            with open(DATA + '/EP' + str(ep) + '/' + str(i) + '.txt') as file_object:
+                for line in file_object:
+                    line = line.rstrip()
+                    line = line.split(",")
+                    r = Record()
+                    r.x = float(line[3])
+                    r.y = float(line[4])
+                    r.z = int(line[1])
+                    insert(r)
+    elif DATA == 'geo_data':
+        path = DATA + '/EP' + str(ep) + '/'
+        dirs = os.listdir(path)
+        for file_name in dirs:
+            with open(path + '/' + file_name) as file_object:
+                for line in file_object:
+                    line = line.rstrip()
+                    line = line.split(",")
+                    r = Record()
+                    r.x = float(line[3])
+                    r.y = float(line[4])
+                    r.z = float(line[5]) - ep_start_t[ep]
+                    if r.z > ep_time:
+                        continue
+                    insert(r)
+    visit_time += math.ceil(max_count / 341)
+    index_file.close()
+    data_file.close()
     # 将grid array 写入硬盘
     index_file = open(index_file_name, 'wb')
     for i in range(nx):
@@ -752,7 +933,7 @@ for ep in range(2, 11):
         write_block(B[i])
     data_file.close()
     time_end = time.time()
-    print('cost of maintain time:', time_end - time_start, 's')
+    maintain_time = time_end - time_start + ((visit_time + write_time) * 0.3 / 1000)
     print('flag = ' + str(flag))
     print('nx = ' + str(nx))
     print('ny = ' + str(ny))
@@ -763,23 +944,31 @@ for ep in range(2, 11):
     print(X)
     print(Y)
     print(Z)
+    print("visit time:", visit_time)
+    print("write time:", write_time)
+    print("maintain time:", maintain_time, 's')
+    print("\n")
 
 
 # 周期更新点查询
 # 一个索引块可以放1024(1000)个索引项 1000 * 8
 # 一个数据块可以放341个数据
+print("point query")
 data_buffer = Buffer()
 data_buffer.max_size = 128
 data_buffer.id_list = []
 data_buffer.block_dict = {}
 index_buffer = Buffer()
-index_buffer.max_size = 512
+index_buffer.max_size = 640
 index_buffer.id_list = []
 index_buffer.block_dict = {}
 time_start = time.time()
 success = 0
 fail = 0
 visit_time = 0
+write_time = 0
+read_time_count = 0
+read_count = 0
 index_file = open(index_file_name, "rb")
 data_file = open(data_file_name, "rb")
 with open(point_query_file2_name) as file_object:
@@ -789,28 +978,33 @@ with open(point_query_file2_name) as file_object:
         r = Record()
         r.x = float(line[0])
         r.y = float(line[1])
-        r.z = float(line[2])
+        r.z = float(line[2]) % ep_time
         result = point_query(r)
         if result == 1:
             success += 1
         elif result == 0:
             fail += 1
+visit_time += math.ceil(500 / 341)
 time_end = time.time()
 print('point_query_time cost:', time_end - time_start, 's')
 print('visit time:', visit_time)
+print("\n")
 
 
 # 范围查询
+print("range query")
 data_buffer = Buffer()
 data_buffer.max_size = 128
 data_buffer.id_list = []
 data_buffer.block_dict = {}
 index_buffer = Buffer()
-index_buffer.max_size = 512
+index_buffer.max_size = 640
 index_buffer.id_list = []
 index_buffer.block_dict = {}
 record_sum = 0
 visit_time = 0
+write_time = 0
+bucket_count = 0
 time_start = time.time()
 # 将索引块加入缓存区
 index_file = open(index_file_name, "rb")
@@ -831,7 +1025,9 @@ with open(range_query_file_name) as file_object:
         result = range_query(rang)
         record_count = len(result)
         record_sum += record_count
+visit_time += math.ceil(1000 / 341)
 time_end = time.time()
 print('range_query_time cost:', time_end - time_start, 's')
 print('visit time:', visit_time)
 print('record sum:', record_sum)
+print('bucket count:', bucket_count)
