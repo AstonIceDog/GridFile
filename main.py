@@ -8,22 +8,22 @@ import os
 DATA = "geo_data"
 max_c = 341  # 25 * 7   # 最大桶容量 10<c<1000 c=70效果最好 7 70 700
 flag = 0    # 表示分裂次数，用来循环分裂操作flag % 3 == 0时分裂x；flag % 3 == 1时分裂y；flag % 3 == 2时分裂z
-if DATA == "sim_data_30w":
+if DATA == "sim_data":
     data_file_name = "sim.dat"
     index_file_name = "sim.idx"
     range_query_file_name = "rangeQuery_sim.txt"
     point_query_file1_name = "pointQuery1_sim.txt"
     point_query_file2_name = "pointQuery2_sim.txt"
-    nx = 29      #
-    ny = 29      #
-    nz = 29      # grid array 大小
+    nx = 82      #
+    ny = 82      #
+    nz = 82      # grid array 大小
     max_x_value = 50000     # x
     min_x_value = 0
     max_y_value = 50000     # y
     min_y_value = 0
-    max_z_value = 1000      # t
+    max_z_value = 2000      # t
     min_z_value = 0
-    max_count = 300000  # 一期200w数据
+    max_count = 2000000  # 一期200w数据
     ep_start_t = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     ep_time = 1000
 elif DATA == "geo_data":
@@ -32,16 +32,16 @@ elif DATA == "geo_data":
     range_query_file_name = "rangeQuery_real.txt"
     point_query_file1_name = "pointQuery1_real.txt"
     point_query_file2_name = "pointQuery2_real.txt"
-    nx = 300      #
-    ny = 300      #
-    nz = 300      # grid array 大小
+    nx = 200      #
+    ny = 200      #
+    nz = 200      # grid array 大小
     max_x_value = 116.7285615      # x
     max_y_value = 40.1799936     # y
     min_x_value = 116.0800006   # 116.0800006
     min_y_value = 39.6800104000001     # 39.6800104000001
     max_z_value = 2678400      # t
     min_z_value = 0
-    max_count = 299390  # 一期20w数据
+    max_count = 939792  # 一期20w数据
     ep_start_t = [0, 1228060800, 1230739200, 1233417600, 1235836800, 1238515200, 1241107200, 1243785600, 1246377600, 1249056000, 1251734400]
     ep_time = 2678400
 
@@ -356,8 +356,9 @@ def insert(r):
     pos = find(r)
     if ep == 1:
         bucket_id = grid_array[pos.x][pos.y][pos.z]
-        B[bucket_id].list.append(r)
-        if len(B[bucket_id].list) > max_c:
+        if len(B[bucket_id].list) <= max_c:
+            B[bucket_id].list.append(r)
+        elif len(B[bucket_id].list) > max_c:
             flag += 1
     elif ep > 1:
         bucket_id = grid_array[pos.x][pos.y][pos.z]
@@ -419,7 +420,6 @@ def insert(r):
         # 如果桶溢出,则进行分裂操作
         # 分裂前检查是否两个块指向一个桶！！！
         if len(B[bucket_id].list) > max_c:
-            print(1)
             if grid_array[pos.x + 1][pos.y][pos.z] == bucket_id:
                 remove_record = []
                 new_bucket = Block()
@@ -719,9 +719,9 @@ R = []
 ep = 1
 print('ep' + str(ep))
 time_start = time.time()
-if DATA == "sim_data_30w":
+if DATA == "sim_data":
     print(DATA)
-    for i in range(300):
+    for i in range(1000):
         with open(DATA + '/EP1/' + str(i) + '.txt') as file_object:
             for line in file_object:
                 line = line.rstrip()
@@ -876,6 +876,7 @@ print("\n")
 # 动态装入 ep2~ep10
 flag = 0
 for ep in range(2, 11):
+    count = 0
     index_file = open(index_file_name, "rb")
     data_file = open(data_file_name, "rb")
     visit_time = 0
@@ -890,8 +891,8 @@ for ep in range(2, 11):
     index_buffer.block_dict = {}
     print('ep' + str(ep))
     time_start = time.time()
-    if DATA == 'sim_data_30w':
-        for i in range(300):
+    if DATA == 'sim_data':
+        for i in range(1000):
             with open(DATA + '/EP' + str(ep) + '/' + str(i) + '.txt') as file_object:
                 for line in file_object:
                     line = line.rstrip()
@@ -916,6 +917,8 @@ for ep in range(2, 11):
                     if r.z > ep_time:
                         continue
                     insert(r)
+                    count += 1
+            print("count:", count)
     visit_time += math.ceil(max_count / 341)
     index_file.close()
     data_file.close()
@@ -949,6 +952,86 @@ for ep in range(2, 11):
     print("maintain time:", maintain_time, 's')
     print("\n")
 
+    # 周期更新点查询
+    # 一个索引块可以放1024(1000)个索引项 1000 * 8
+    # 一个数据块可以放341个数据
+    print("point query")
+    data_buffer = Buffer()
+    data_buffer.max_size = 128
+    data_buffer.id_list = []
+    data_buffer.block_dict = {}
+    index_buffer = Buffer()
+    index_buffer.max_size = 640
+    index_buffer.id_list = []
+    index_buffer.block_dict = {}
+    time_start = time.time()
+    success = 0
+    fail = 0
+    visit_time = 0
+    write_time = 0
+    read_time_count = 0
+    read_count = 0
+    index_file = open(index_file_name, "rb")
+    data_file = open(data_file_name, "rb")
+    with open(point_query_file2_name) as file_object:
+        for line in file_object:
+            line = line.rstrip()
+            line = line.split(",")
+            r = Record()
+            r.x = float(line[0])
+            r.y = float(line[1])
+            r.z = float(line[2]) % ep_time
+            result = point_query(r)
+            if result == 1:
+                success += 1
+            elif result == 0:
+                fail += 1
+    visit_time += math.ceil(500 / 341)
+    time_end = time.time()
+    print('point_query_time cost:', time_end - time_start, 's')
+    print('visit time:', visit_time)
+    print("\n")
+
+    # 范围查询
+    print("range query")
+    data_buffer = Buffer()
+    data_buffer.max_size = 128
+    data_buffer.id_list = []
+    data_buffer.block_dict = {}
+    index_buffer = Buffer()
+    index_buffer.max_size = 640
+    index_buffer.id_list = []
+    index_buffer.block_dict = {}
+    record_sum = 0
+    visit_time = 0
+    write_time = 0
+    bucket_count = 0
+    time_start = time.time()
+    # 将索引块加入缓存区
+    index_file = open(index_file_name, "rb")
+    data_file = open(data_file_name, "rb")
+    with open(range_query_file_name) as file_object:
+        for line in file_object:
+            line = line.rstrip()
+            line = line.split(",")
+            rang = Range()
+            rang.x_min = float(line[0])
+            rang.x_max = float(line[1])
+            rang.y_min = float(line[2])
+            rang.y_max = float(line[3])
+            rang.z_min = float(line[4])
+            rang.z_max = float(line[5])
+            if rang.z_max > ep_time:
+                rang.z_max = ep_time
+            result = range_query(rang)
+            record_count = len(result)
+            record_sum += record_count
+    visit_time += math.ceil(1000 / 341)
+    time_end = time.time()
+    print('range_query_time cost:', time_end - time_start, 's')
+    print('visit time:', visit_time)
+    print('record sum:', record_sum)
+    print('bucket count:', bucket_count)
 
 # 周期更新点查询
 # 一个索引块可以放1024(1000)个索引项 1000 * 8
